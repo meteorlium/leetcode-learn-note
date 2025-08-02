@@ -238,6 +238,32 @@ self.k_cache = self.k_cache.half()  # float32 -> float16
 # 而不是 (num_heads, batch_size, seq_len, head_dim)
 ```
 
+### Q6: MoE模型的KV缓存有什么特殊考虑？
+
+**主流MoE（FFN层MoE）**：
+- **KV缓存完全不变**：MoE只作用在Feed-Forward层，Attention层保持标准结构
+- **无额外开销**：缓存大小和管理方式与普通Transformer相同
+- **实际案例**：DeepSeek-v3、Mixtral、Switch Transformer等都采用此方案
+
+**理论上的MoE-Attention（极少使用）**：
+```python
+# 如果K、V投影也使用MoE（实际很少见）
+class MoEKVCache:
+    def __init__(self, num_experts=8):
+        # 需要为每个expert维护缓存，或者缓存路由信息
+        self.expert_caches = [KVCache() for _ in range(num_experts)]
+        self.routing_cache = torch.empty(0)  # 缓存expert选择信息
+    
+    def get_memory_overhead(self):
+        # 最坏情况：num_experts倍的内存开销
+        return f"标准缓存的 {self.num_experts} 倍"
+```
+
+**为什么MoE通常不在Attention层使用**：
+- **内存爆炸**：KV缓存会变成原来的num_experts倍
+- **复杂度增加**：路由决策需要额外计算和存储
+- **收益有限**：Attention层的计算量相对FFN层较小
+
 ## 实际部署考虑
 
 ### 1. 内存管理策略
@@ -338,5 +364,42 @@ def generate_multiple_sequences(self, prompts):
 - 根据注意力权重动态调整缓存大小
 - 重要性采样的缓存保留策略
 - 内存受限环境下的缓存淘汰算法
+
+### 4. MoE架构中的KV缓存
+
+**标准MoE（FFN层MoE）**：
+- MoE只作用在Feed-Forward层，Attention层保持标准结构
+- **KV缓存机制完全不变**，与普通Transformer相同
+- 这是主流做法（如DeepSeek-v3、Mixtral等）
+
+```python
+class StandardMoELayer(nn.Module):
+    def forward(self, x):
+        # 标准attention + KV缓存（不受MoE影响）
+        attn_out = self.attention(x, use_cache=True)
+        # MoE只在FFN层
+        return self.moe_ffn(attn_out)
+```
+
+**MoE-Attention变体的挑战**：
+- 如果K、V投影也使用MoE，缓存复杂度显著增加
+- 需要为每个expert维护独立缓存，或缓存路由决策信息
+- 内存开销：原本的 `num_experts` 倍
+
+**实际影响分析**：
+```python
+# 标准模式：缓存大小不变
+cache_size = batch_size * num_heads * seq_len * head_dim * 2  # K + V
+
+# MoE-Attention模式：可能需要的缓存
+moe_cache_size = cache_size * num_experts  # 最坏情况
+# 或者缓存路由信息 + 动态计算
+routing_cache = batch_size * seq_len * num_experts  # 路由权重
+```
+
+**工程权衡**：
+- 绝大多数MoE模型避免在Attention层使用MoE
+- 保持KV缓存的简洁性和高效性
+- 复杂度收益比不划算
 
 这些知识点涵盖了KV缓存在LLM推理中的核心原理、实现细节和工程优化，是算法工程师面试的重要考察内容。
