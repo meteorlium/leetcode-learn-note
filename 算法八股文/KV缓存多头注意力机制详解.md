@@ -264,6 +264,94 @@ class MoEKVCache:
 - **复杂度增加**：路由决策需要额外计算和存储
 - **收益有限**：Attention层的计算量相对FFN层较小
 
+### Q7: Linear层有类似KV缓存的优化技巧吗？
+
+**Linear层缓存的几种形式**：
+1. **权重预计算缓存**：预先计算转置、量化等权重变换
+2. **激活值缓存**：缓存相似输入的计算结果
+3. **MoE路由缓存**：缓存expert选择决策
+
+**关键区别**：
+```python
+# KV缓存：确定性收益（100%命中率）
+def kv_cache_benefit():
+    return "O(n²) → O(n)，确定优化"
+
+# Linear层缓存：概率性收益（命中率不确定）
+def linear_cache_benefit():
+    cache_hit_rate = estimate_similarity(inputs)
+    if cache_hit_rate > threshold:
+        return "有收益"
+    else:
+        return "可能得不偿失"
+```
+
+**为什么Linear层缓存不普及**：
+- **收益不确定**：取决于输入模式和相似性
+- **实现复杂**：需要相似性判断、缓存策略设计
+- **适用场景有限**：只在特定重复计算场景有效
+
+**实际应用**：主要在权重量化、模型压缩等特定优化场景中使用
+
+### Q8: 为什么KV缓存只能在推理中使用，不能在训练中使用？
+
+**核心原因：计算模式根本不同**
+
+**训练时（Teacher Forcing）**：
+```python
+def training_mode(input_sequence):
+    """训练：并行计算整个序列，无历史依赖"""
+    # 输入完整序列："The cat sat on the mat"
+    Q = compute_query(input_sequence)    # 所有位置并行计算
+    K = compute_key(input_sequence)      # 所有位置并行计算
+    V = compute_value(input_sequence)    # 所有位置并行计算
+    
+    # 一次性计算整个attention矩阵
+    attention_matrix = softmax(Q @ K.T / sqrt(d_k))  # [seq_len, seq_len]
+    return attention_matrix @ V
+```
+
+**推理时（自回归生成）**：
+```python
+def inference_mode():
+    """推理：逐个生成token，存在历史依赖"""
+    sequence = ["The", "cat", "sat"]  # 已生成部分
+    
+    # 只需计算新token的query
+    q_new = compute_query("on")  # 新token
+    
+    # 复用历史K,V（KV缓存的价值所在）
+    k_cached = get_cached_keys(["The", "cat", "sat"])
+    v_cached = get_cached_values(["The", "cat", "sat"])
+    
+    return softmax(q_new @ k_cached.T) @ v_cached
+```
+
+**关键区别总结**：
+
+| 维度 | 训练模式 | 推理模式 |
+|------|----------|----------|
+| **计算方式** | 并行计算整个序列 | 逐个生成token |
+| **历史依赖** | 无（每个样本独立） | 有（基于历史生成） |
+| **重复计算** | 无历史K,V需要复用 | 历史K,V被重复使用 |
+| **KV缓存需求** | 不需要 | 必需（核心优化） |
+
+**为什么训练不需要KV缓存**：
+1. **无增量计算场景**：每个训练样本都是完整序列，一次性并行处理
+2. **无历史复用需求**：不存在"基于历史生成下一个token"的场景
+3. **优化重点不同**：训练关注FlashAttention、梯度检查点等其他优化
+
+**即使参数固定，训练也不需要KV缓存**：
+```python
+# 即使权重不更新，训练模式仍然是并行计算
+def training_with_fixed_params():
+    for batch in dataloader:
+        for sequence in batch:
+            # 仍然是整个序列的并行计算
+            # 没有"复用历史计算"的应用场景
+            output = parallel_attention(sequence)
+```
+
 ## 实际部署考虑
 
 ### 1. 内存管理策略
@@ -401,5 +489,56 @@ routing_cache = batch_size * seq_len * num_experts  # 路由权重
 - 绝大多数MoE模型避免在Attention层使用MoE
 - 保持KV缓存的简洁性和高效性
 - 复杂度收益比不划算
+
+### 5. Linear层的缓存技巧
+
+**与KV缓存的区别**：Linear层缓存主要针对权重计算优化，而非序列依赖优化
+
+**权重预计算缓存**：
+```python
+class OptimizedLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        
+        # 预计算缓存：避免运行时重复计算
+        self.register_buffer('weight_transposed', None)
+        self.register_buffer('weight_quantized', None)
+    
+    def prepare_cache(self):
+        """预计算权重变换"""
+        self.weight_transposed = self.weight.T.contiguous()  # 缓存转置
+        self.weight_quantized = self.quantize_weight(self.weight)  # 缓存量化权重
+```
+
+**MoE路由缓存**：
+```python
+class MoEWithRouterCache(nn.Module):
+    def forward(self, x):
+        # 缓存路由决策，避免重复计算expert选择
+        input_hash = torch.sum(x, dim=-1, keepdim=True)
+        
+        if self.is_similar_input(input_hash):
+            return self.use_cached_routing(x)  # 复用路由结果
+        
+        # 新计算并缓存
+        routing = self.compute_routing(x)
+        self.cache_routing(input_hash, routing)
+        return self.apply_routing(x, routing)
+```
+
+**Linear层缓存 vs KV缓存对比**：
+
+| 维度 | KV缓存 | Linear层缓存 |
+|------|--------|--------------|
+| **适用场景** | 自回归生成（确定性复用） | 重复计算、相似输入（概率性复用） |
+| **命中率** | 100%（历史K,V必然复用） | 取决于输入相似性（不确定） |
+| **收益确定性** | 确定的O(n²)→O(n)优化 | 不确定，可能得不偿失 |
+| **工业应用** | 广泛使用（LLM推理标配） | 特定场景下有效 |
+
+**为什么Linear层缓存不如KV缓存普及**：
+- **收益不确定**：能否命中缓存取决于输入模式
+- **复杂度高**：需要设计相似性判断和缓存策略
+- **场景限制**：只在特定重复计算场景下有效
 
 这些知识点涵盖了KV缓存在LLM推理中的核心原理、实现细节和工程优化，是算法工程师面试的重要考察内容。
