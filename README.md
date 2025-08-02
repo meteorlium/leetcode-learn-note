@@ -1,10 +1,17 @@
-# leetcode-learn-note
+# LLM 算法工程师面试准备
 
-算法工程师面试 leetcode 准备。python 语言。也包括算法模型编程题（例如 self-attention）。
+## 为什么要准备这些？
 
-1. leetcode: 包含 leetcode 热门题目的题解和笔记。
-2. python-data-structure：编写 leetcode 时的 python 数据结构使用笔记，例如 heapq 常见用法。
-3. algorithm-model：算法工程师常考的模型编程题，例如 self-attention。
-4. 算法八股文：深度学习算法岗面试的八股文知识。
-   
-注意：大量内容由 AI 编写，如果错误，欢迎指出！
+LLM 算法工程师面试通常考察三个维度：
+- **编程能力**：LeetCode 算法题验证基础数据结构和算法思维
+- **模型理解**：手写核心算法（如 Attention）考察对深度学习的深度理解
+- **技术广度**：八股文检验工程实践和理论基础的积累
+
+## 内容结构
+
+1. **leetcode**：热门算法题解，训练编程思维和代码能力
+2. **python-data-structure**：Python 数据结构使用技巧（如 heapq）
+3. **algorithm-model**：核心算法实现（Multi-Head Attention、Softmax 等）
+4. **算法八股文**：深度学习理论知识整理
+
+> 注意：大量内容由 AI 辅助编写，如有错误欢迎指正！
