@@ -1,8 +1,10 @@
-import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 
-class MultiHeadAttention:
+class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
         """
         Multi-Head Attention implementation
@@ -12,6 +14,8 @@ class MultiHeadAttention:
             d_model: dimension of model (模型维度)
             num_heads: number of attention heads (注意力头数)
         """
+        super(MultiHeadAttention, self).__init__()
+        
         # 【面试考点1】：维度校验 - d_model必须能被num_heads整除
         # 这是因为每个头要分配相等的维度 d_k = d_model // num_heads
         assert d_model % num_heads == 0, "d_model必须能被num_heads整除"
@@ -21,12 +25,12 @@ class MultiHeadAttention:
         self.d_k = d_model // num_heads  # 每个头的维度
         
         # 【面试考点2】：参数初始化策略
-        # 使用小的随机数初始化权重，避免梯度爆炸/消失
-        # 实际工程中常用Xavier或He初始化
-        self.W_q = np.random.randn(d_model, d_model) * 0.01  # Query投影矩阵
-        self.W_k = np.random.randn(d_model, d_model) * 0.01  # Key投影矩阵  
-        self.W_v = np.random.randn(d_model, d_model) * 0.01  # Value投影矩阵
-        self.W_o = np.random.randn(d_model, d_model) * 0.01  # 输出投影矩阵
+        # 使用PyTorch的nn.Linear层，自动进行权重初始化
+        # PyTorch默认使用Kaiming uniform初始化
+        self.W_q = nn.Linear(d_model, d_model, bias=False)  # Query投影矩阵
+        self.W_k = nn.Linear(d_model, d_model, bias=False)  # Key投影矩阵  
+        self.W_v = nn.Linear(d_model, d_model, bias=False)  # Value投影矩阵
+        self.W_o = nn.Linear(d_model, d_model, bias=False)  # 输出投影矩阵
     
     def scaled_dot_product_attention(self, Q, K, V, mask=None):
         """
@@ -48,7 +52,7 @@ class MultiHeadAttention:
         # 【面试考点3】：注意力分数计算 - QK^T
         # 矩阵乘法：(batch, heads, seq_len, d_k) × (batch, heads, d_k, seq_len)
         # 结果形状：(batch, heads, seq_len, seq_len) - 每个位置对所有位置的注意力
-        scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / math.sqrt(d_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
         
         # 【面试考点4】：缩放因子√d_k的作用
         # 防止softmax饱和：当d_k很大时，点积值会很大，导致softmax梯度接近0
@@ -57,27 +61,18 @@ class MultiHeadAttention:
         # 【面试考点5】：Mask机制处理
         # 用-inf替换mask位置，softmax后这些位置权重为0
         if mask is not None:
-            scores = np.where(mask == 0, -1e9, scores)
+            scores = scores.masked_fill(mask == 0, -1e9)
         
         # 【面试考点6】：Softmax归一化
         # 将注意力分数转换为概率分布，保证权重和为1
-        attention_weights = self.softmax(scores)
+        attention_weights = F.softmax(scores, dim=-1)
         
         # 【面试考点7】：加权求和
         # 用注意力权重对Value进行加权平均，得到上下文向量
-        output = np.matmul(attention_weights, V)
+        output = torch.matmul(attention_weights, V)
         
         return output, attention_weights
     
-    def softmax(self, x):
-        """
-        Numerically stable softmax - 数值稳定的softmax实现
-        【面试考点8】：数值稳定性处理
-        直接计算exp(x)可能导致数值溢出，减去最大值可以避免这个问题
-        softmax(x) = softmax(x - max(x)) 数学上等价但数值更稳定
-        """
-        exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
-        return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
     
     def forward(self, x, mask=None):
         """
@@ -96,32 +91,32 @@ class MultiHeadAttention:
         # 【面试考点9】：线性投影生成Q,K,V
         # 将输入通过不同的权重矩阵投影得到Query, Key, Value
         # 这使得模型能学习到不同的表示子空间
-        Q = np.matmul(x, self.W_q)  # (batch_size, seq_len, d_model)
-        K = np.matmul(x, self.W_k)  # (batch_size, seq_len, d_model)
-        V = np.matmul(x, self.W_v)  # (batch_size, seq_len, d_model)
+        Q = self.W_q(x)  # (batch_size, seq_len, d_model)
+        K = self.W_k(x)  # (batch_size, seq_len, d_model)
+        V = self.W_v(x)  # (batch_size, seq_len, d_model)
         
         # 【面试考点10】：多头分割 - 核心的维度变换
         # 将d_model维度分割成num_heads个d_k维度的子空间
         # reshape: (batch, seq_len, d_model) -> (batch, seq_len, num_heads, d_k)
-        # transpose: (batch, seq_len, num_heads, d_k) -> (batch, num_heads, seq_len, d_k)
-        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.d_k).transpose(0, 2, 1, 3)
-        K = K.reshape(batch_size, seq_len, self.num_heads, self.d_k).transpose(0, 2, 1, 3)
-        V = V.reshape(batch_size, seq_len, self.num_heads, self.d_k).transpose(0, 2, 1, 3)
+        # permute: (batch, seq_len, num_heads, d_k) -> (batch, num_heads, seq_len, d_k)
+        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.d_k).permute(0, 2, 1, 3)
+        K = K.reshape(batch_size, seq_len, self.num_heads, self.d_k).permute(0, 2, 1, 3)
+        V = V.reshape(batch_size, seq_len, self.num_heads, self.d_k).permute(0, 2, 1, 3)
         
         # 【面试考点11】：并行计算多个注意力头
         # 每个头独立计算注意力，捕获不同的语义关系
         attention_output, attention_weights = self.scaled_dot_product_attention(Q, K, V, mask)
         
         # 【面试考点12】：多头拼接 - 恢复原始维度
-        # transpose: (batch, num_heads, seq_len, d_k) -> (batch, seq_len, num_heads, d_k)
+        # permute: (batch, num_heads, seq_len, d_k) -> (batch, seq_len, num_heads, d_k)
         # reshape: (batch, seq_len, num_heads, d_k) -> (batch, seq_len, d_model)
-        attention_output = attention_output.transpose(0, 2, 1, 3).reshape(
+        attention_output = attention_output.permute(0, 2, 1, 3).reshape(
             batch_size, seq_len, self.d_model
         )
         
         # 【面试考点13】：最终线性变换
         # 通过输出投影矩阵W_o整合多头信息，这是可学习的参数
-        output = np.matmul(attention_output, self.W_o)
+        output = self.W_o(attention_output)
         
         return output
 
@@ -143,11 +138,12 @@ def test_multi_head_attention():
     print(f"每个头的维度 d_k = d_model // num_heads = {d_model // num_heads}")
     
     # Create test input
-    x = np.random.randn(batch_size, seq_len, d_model)
+    x = torch.randn(batch_size, seq_len, d_model)
     print(f"输入形状: {x.shape}")
     
     # Initialize multi-head attention
     mha = MultiHeadAttention(d_model, num_heads)
+    mha.eval()  # Set to evaluation mode
     
     # 【面试考点16】：计算复杂度分析
     print(f"\n=== 复杂度分析 ===")
@@ -159,14 +155,14 @@ def test_multi_head_attention():
     
     print(f"\n=== 输出验证 ===")
     print(f"输出形状: {output.shape}")
-    print(f"形状是否保持: {output.shape == x.shape}")
+    print(f"形状是否保持: {tuple(output.shape) == tuple(x.shape)}")
     
     # 【面试考点17】：维度校验 - 关键的正确性检查
     assert output.shape == x.shape, f"形状不匹配! 期望{x.shape}, 得到{output.shape}"
     
     # 【面试考点18】：数值范围检查
-    print(f"输出数值范围: [{output.min():.4f}, {output.max():.4f}]")
-    print(f"输出均值: {output.mean():.4f}, 标准差: {output.std():.4f}")
+    print(f"输出数值范围: [{output.min().item():.4f}, {output.max().item():.4f}]")
+    print(f"输出均值: {output.mean().item():.4f}, 标准差: {output.std().item():.4f}")
     
     # 【面试考点19】：梯度检查 (简化版)
     # 在实际面试中可能会要求实现反向传播
